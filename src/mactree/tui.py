@@ -504,44 +504,108 @@ def _squarify(children, x, y, w, h):
 
 
 def _render_grid(stdscr, view, focus, selected_idx, w, h, body_top, body_h, exact):
-    """Draw the treemap grid of ``focus``'s children. Returns list of (node)."""
+    """Draw the treemap grid of ``focus``'s children, btop-style. Returns kids."""
     kids = [c for c in view.children(focus) if c.size > 0]
     gx, gy = 1, body_top
     gw, gh = w - 2, body_h
     tiles = _squarify(kids, gx, gy, gw, gh)
 
     sel_node = kids[selected_idx] if kids and 0 <= selected_idx < len(kids) else None
-
     maxsize = max((c.size for c in kids), default=1)
-    for ti, t in enumerate(tiles):
+
+    for t in tiles:
         node = t.node
         is_sel = (node is sel_node)
-        frac_total = node.size / maxsize if maxsize else 0
-        attr = _grad_attr(1.0 - frac_total)  # big = hot color
-        fill = curses.A_REVERSE | attr
-        if is_sel:
-            fill = C(C_SEL) | curses.A_BOLD
-
-        x0, y0, tw, th = t.x, t.y, t.w, t.h
-        if tw < 2 or th < 1:
-            continue
-        # fill the tile
-        for ry in range(th):
-            _put(stdscr, y0 + ry, x0, " " * tw, fill)
-        # border for selected
-        if is_sel and tw >= 2 and th >= 2:
-            _put(stdscr, y0, x0, "▛" + "▀" * (tw - 2) + "▜", C(C_SEL) | curses.A_BOLD)
-            _put(stdscr, y0 + th - 1, x0, "▙" + "▄" * (tw - 2) + "▟", C(C_SEL) | curses.A_BOLD)
-        # labels (if room)
-        glyph = _glyph(node, False)
-        name = node.name + ("/" if node.is_dir else "")
-        if th >= 1 and tw >= 4:
-            label = f"{glyph} {name}"
-            _put(stdscr, y0, x0 + 1, label[: tw - 1], fill | curses.A_BOLD)
-        if th >= 2 and tw >= 6:
-            szs = f"{node.size:,}" if exact else human(node.size)
-            _put(stdscr, y0 + 1, x0 + 1, szs[: tw - 1], fill)
+        frac = node.size / maxsize if maxsize else 0.0  # share of biggest sibling
+        _draw_btop_tile(stdscr, t, node, frac, is_sel, exact)
     return kids
+
+
+# btop-style shading ramp (sparse -> dense) and a per-level color gradient.
+_SHADE = " ░▒▓█"
+
+
+def _meter_attr(level01: float) -> int:
+    """Color for a meter cell at vertical position ``level01`` (0 bottom..1 top).
+
+    btop meters run green (low) -> yellow -> red (high). We map the cell's
+    height fraction onto that ramp.
+    """
+    if not _GRAD_PAIRS:
+        return 0
+    # _GRAD_PAIRS is red(hot)..cyan(cool); invert so high=hot.
+    idx = int(max(0.0, min(0.999, 1.0 - level01)) * len(_GRAD_PAIRS))
+    return C(_GRAD_PAIRS[idx])
+
+
+def _draw_btop_tile(stdscr, t, node, frac, is_sel, exact):
+    x0, y0, tw, th = t.x, t.y, t.w, t.h
+    if tw < 3 or th < 2:
+        # too small for a frame: single shaded cell(s)
+        attr = _meter_attr(frac) | (curses.A_BOLD if is_sel else 0)
+        for ry in range(max(1, th)):
+            _put(stdscr, y0 + ry, x0, _SHADE[-1] * tw, attr)
+        return
+
+    frame_attr = (C(C_SEL) | curses.A_BOLD) if is_sel else C(C_ACCENT)
+    name = node.name + ("/" if node.is_dir else "")
+    glyph = _glyph(node, False)
+    label = f" {glyph} {name} "
+
+    inner_w = tw - 2
+    inner_h = th - 2
+
+    # --- top border with embedded title (btop style: ╭─ name ───╮) ---
+    title = label[: max(0, inner_w)]
+    pad = inner_w - len(title)
+    top_line = "╭" + title + "─" * max(0, pad) + "╮"
+    _put(stdscr, y0, x0, top_line[: tw], frame_attr | (curses.A_BOLD if not is_sel else 0))
+
+    # --- side borders ---
+    for ry in range(1, th - 1):
+        _put(stdscr, y0 + ry, x0, "│", frame_attr)
+        _put(stdscr, y0 + ry, x0 + tw - 1, "│", frame_attr)
+
+    # --- bottom border ---
+    _put(stdscr, y0 + th - 1, x0, "╰" + "─" * inner_w + "╯", frame_attr)
+
+    # --- interior: braille/dithered gradient meter filling from bottom ---
+    if inner_w >= 1 and inner_h >= 1:
+        # columns all filled to the same height = frac (a "level" meter),
+        # but give each column a slight dither so it looks like btop's graph.
+        fill_rows = frac * inner_h
+        for cx in range(inner_w):
+            # subtle per-column jitter using a cheap hash for a graph-like edge
+            jit = ((hash((node.path, cx)) >> 8) & 7) / 7.0 * 0.6 - 0.3
+            colh = max(0.0, min(inner_h, fill_rows + jit))
+            full = int(colh)
+            frac_cell = colh - full
+            for ry in range(inner_h):
+                # ry=0 is top interior row; meter grows from bottom
+                from_bottom = inner_h - 1 - ry
+                yy = y0 + 1 + ry
+                xx = x0 + 1 + cx
+                if from_bottom < full:
+                    ch = _SHADE[-1]
+                    lvl = (from_bottom + 1) / inner_h
+                elif from_bottom == full and frac_cell > 0.1:
+                    ch = _SHADE[min(len(_SHADE) - 1, 1 + int(frac_cell * (len(_SHADE) - 1)))]
+                    lvl = (from_bottom + 1) / inner_h
+                else:
+                    ch = " "
+                    lvl = 0.0
+                if ch == " ":
+                    continue
+                attr = (C(C_SEL) if is_sel else _meter_attr(lvl))
+                _put(stdscr, yy, xx, ch, attr)
+
+    # --- size label centered in the interior (over the meter) ---
+    szs = (f"{node.size:,}" if exact else human(node.size))
+    if inner_w >= len(szs) and inner_h >= 1:
+        sy = y0 + 1 + inner_h // 2
+        sx = x0 + 1 + max(0, (inner_w - len(szs)) // 2)
+        _put(stdscr, sy, sx, szs, (C(C_SEL) | curses.A_BOLD) if is_sel
+             else (C(C_FG) | curses.A_BOLD))
 
 
 # --------------------------------------------------------------------------
