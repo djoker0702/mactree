@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MacTree — disk usage</title>
+  <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header>
+    <div class="brand"><span class="logo">🌳</span> MacTree</div>
+    <form id="scan-form">
+      <input id="path-input" type="text" spellcheck="false"
+             placeholder="/path/to/scan" autocomplete="off" />
+      <button id="scan-btn" type="submit">Scan</button>
+    </form>
+    <div class="view-toggle">
+      <button data-view="treemap" class="active">Treemap</button>
+      <button data-view="sunburst">Sunburst</button>
+    </div>
+  </header>
+
+  <div id="status" class="status"></div>
+
+  <nav id="breadcrumbs" class="breadcrumbs"></nav>
+
+  <div class="workspace">
+    <main id="chart"></main>
+
+    <aside id="inspector" class="inspector">
+      <div class="insp-empty">Hover or click a region to inspect it.</div>
+    </aside>
+  </div>
+
+  <div id="tooltip" class="tooltip" hidden></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
