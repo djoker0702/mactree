@@ -65,16 +65,29 @@ python -m mactree / --workers 32  # scan the whole disk with 32 scan threads
 
 **Keys**
 
+The TUI has two views — a **list** (tree) view and a **grid** (treemap) view —
+switchable at any time.
+
 | Key | Action |
 | --- | --- |
+| `L` | switch to **list** (tree) view |
+| `G` | switch to **grid** (treemap) view |
 | `↑` / `↓` or `j` / `k` | move selection |
-| `→` / `Enter` / `l` | expand folder / descend |
-| `←` / `h` | collapse / jump to parent |
-| `g` / `G` | jump to top / bottom |
-| `PgUp` / `PgDn` | page up / down |
+| `→` / `Enter` / `l` | expand folder / descend (list); in grid, `Enter` descends |
+| `←` / `h` | collapse / jump to parent (list) |
+| `Backspace` | go up a level (grid) |
+| `g` / `Home` | jump to top (list) |
+| `End` | jump to bottom (list) |
+| `PgUp` / `PgDn` | page up / down (list) |
 | `s` | toggle size units (human-readable ↔ exact bytes) |
 | `r` | rescan |
 | `q` | quit |
+
+In **list** view, each row shows the entry's size, its percentage of the parent
+folder, and a gradient usage bar, with tree guide lines and file-type glyphs.
+In **grid** view, the current folder's children are packed as proportionally
+sized treemap tiles (bigger = more disk) — navigate with the arrows and press
+`Enter` to zoom into a folder, `Backspace` to go back up.
 
 Each row shows the entry's size, its percentage of the parent folder, and a bar.
 Colors indicate relative size: red (huge) → yellow → green → cyan (small);

@@ -86,6 +86,10 @@ class TreeView:
         walk(self.root, 0)
         self.rows = rows
 
+    def children(self, node: Node) -> List[Node]:
+        """Public: directory children sorted largest-first."""
+        return self._children(node)
+
     def is_expanded(self, node: Node) -> bool:
         return node.path in self._expanded
 
@@ -435,6 +439,112 @@ def _tree_prefix(view: TreeView, idx: int) -> str:
 
 
 # --------------------------------------------------------------------------
+# Grid (treemap) view
+# --------------------------------------------------------------------------
+class Tile:
+    __slots__ = ("node", "x", "y", "w", "h")
+
+    def __init__(self, node, x, y, w, h):
+        self.node = node
+        self.x = x; self.y = y; self.w = w; self.h = h
+
+
+def _squarify(children, x, y, w, h):
+    """A simple squarified-ish treemap: returns list of Tile.
+
+    Lays children (already sorted largest-first) into the rectangle, slicing
+    along the longer side and alternating, aiming for low aspect ratios.
+    """
+    tiles: List[Tile] = []
+    items = [(c, max(1, c.size)) for c in children if c.size > 0]
+    if not items:
+        return tiles
+    total = sum(s for _, s in items)
+
+    def layout(items, x, y, w, h):
+        if not items or w < 1 or h < 1:
+            return
+        if len(items) == 1:
+            c, _ = items[0]
+            tiles.append(Tile(c, round(x), round(y), max(1, round(w)), max(1, round(h))))
+            return
+        tot = sum(s for _, s in items)
+        # take a prefix row whose area best fills the shorter side
+        if w >= h:
+            # slice vertical columns: give first group a column of width prop
+            # Split into two halves by area to keep recursion balanced.
+            half = tot / 2
+            acc = 0; k = 0
+            for k in range(len(items)):
+                acc += items[k][1]
+                if acc >= half:
+                    k += 1
+                    break
+            k = max(1, min(len(items) - 1, k))
+            left = items[:k]; right = items[k:]
+            lw = w * (sum(s for _, s in left) / tot)
+            layout(left, x, y, lw, h)
+            layout(right, x + lw, y, w - lw, h)
+        else:
+            half = tot / 2
+            acc = 0; k = 0
+            for k in range(len(items)):
+                acc += items[k][1]
+                if acc >= half:
+                    k += 1
+                    break
+            k = max(1, min(len(items) - 1, k))
+            top = items[:k]; bot = items[k:]
+            th = h * (sum(s for _, s in top) / tot)
+            layout(top, x, y, w, th)
+            layout(bot, x, y + th, w, h - th)
+
+    layout(items, x, y, w, h)
+    return tiles
+
+
+def _render_grid(stdscr, view, focus, selected_idx, w, h, body_top, body_h, exact):
+    """Draw the treemap grid of ``focus``'s children. Returns list of (node)."""
+    kids = [c for c in view.children(focus) if c.size > 0]
+    gx, gy = 1, body_top
+    gw, gh = w - 2, body_h
+    tiles = _squarify(kids, gx, gy, gw, gh)
+
+    sel_node = kids[selected_idx] if kids and 0 <= selected_idx < len(kids) else None
+
+    maxsize = max((c.size for c in kids), default=1)
+    for ti, t in enumerate(tiles):
+        node = t.node
+        is_sel = (node is sel_node)
+        frac_total = node.size / maxsize if maxsize else 0
+        attr = _grad_attr(1.0 - frac_total)  # big = hot color
+        fill = curses.A_REVERSE | attr
+        if is_sel:
+            fill = C(C_SEL) | curses.A_BOLD
+
+        x0, y0, tw, th = t.x, t.y, t.w, t.h
+        if tw < 2 or th < 1:
+            continue
+        # fill the tile
+        for ry in range(th):
+            _put(stdscr, y0 + ry, x0, " " * tw, fill)
+        # border for selected
+        if is_sel and tw >= 2 and th >= 2:
+            _put(stdscr, y0, x0, "▛" + "▀" * (tw - 2) + "▜", C(C_SEL) | curses.A_BOLD)
+            _put(stdscr, y0 + th - 1, x0, "▙" + "▄" * (tw - 2) + "▟", C(C_SEL) | curses.A_BOLD)
+        # labels (if room)
+        glyph = _glyph(node, False)
+        name = node.name + ("/" if node.is_dir else "")
+        if th >= 1 and tw >= 4:
+            label = f"{glyph} {name}"
+            _put(stdscr, y0, x0 + 1, label[: tw - 1], fill | curses.A_BOLD)
+        if th >= 2 and tw >= 6:
+            szs = f"{node.size:,}" if exact else human(node.size)
+            _put(stdscr, y0 + 1, x0 + 1, szs[: tw - 1], fill)
+    return kids
+
+
+# --------------------------------------------------------------------------
 # Main browser loop
 # --------------------------------------------------------------------------
 def _browse(stdscr, view: TreeView, scan_path: str) -> str:
@@ -446,6 +556,9 @@ def _browse(stdscr, view: TreeView, scan_path: str) -> str:
     selected = 0
     top = 0
     exact = False
+    mode = "list"            # "list" or "grid"
+    grid_focus = view.root   # directory shown in grid mode
+    grid_sel = 0             # index into grid_focus's children
 
     while True:
         h, w = stdscr.getmaxyx()
@@ -465,60 +578,66 @@ def _browse(stdscr, view: TreeView, scan_path: str) -> str:
 
         # ---- title bar ----
         title = f"  🌳 MacTree "
-        meta = f" {human(root.size)} • {len(rows)} items "
+        view_tag = "▦ GRID" if mode == "grid" else "☰ LIST"
+        meta = f" {view_tag}  {human(root.size)} • {len(rows)} items "
         bar_line = title + " " + _ellip(scan_path, max(0, w - len(title) - len(meta) - 3))
         bar_line = bar_line.ljust(w - len(meta)) + meta
         _put(stdscr, 0, 0, bar_line[: w - 1], C(C_BAR) | curses.A_BOLD)
 
-        # ---- column header ----
-        hdr = f"{'SIZE':>10}  {'%':>5}  {'USAGE':<{_barw(w)}}  NAME"
-        _put(stdscr, 1, 1, hdr[: w - 2], C(C_DIM) | curses.A_UNDERLINE)
+        if mode == "list":
+            # ---- column header ----
+            hdr = f"{'SIZE':>10}  {'%':>5}  {'USAGE':<{_barw(w)}}  NAME"
+            _put(stdscr, 1, 1, hdr[: w - 2], C(C_DIM) | curses.A_UNDERLINE)
 
-        # ---- rows ----
-        bw = _barw(w)
-        for i in range(top, min(len(rows), top + body_h)):
-            row = rows[i]
-            node = row.node
-            y = body_top + (i - top)
-            is_sel = i == selected
+            # ---- rows ----
+            bw = _barw(w)
+            for i in range(top, min(len(rows), top + body_h)):
+                row = rows[i]
+                node = row.node
+                y = body_top + (i - top)
+                is_sel = i == selected
 
-            psize = _parent_size(view, i)
-            frac = (node.size / psize) if psize else 0.0
+                psize = _parent_size(view, i)
+                frac = (node.size / psize) if psize else 0.0
 
-            size_str = (f"{node.size:,}" if exact else human(node.size)).rjust(10)
-            pct = f"{frac*100:4.1f}%"
-            prefix = _tree_prefix(view, i)
-            glyph = _glyph(node, view.is_expanded(node))
-            caret = ("▾ " if view.is_expanded(node) else "▸ ") if node.is_dir and node.children else "  "
-            name = node.name + ("/" if node.is_dir else "")
+                size_str = (f"{node.size:,}" if exact else human(node.size)).rjust(10)
+                pct = f"{frac*100:4.1f}%"
+                prefix = _tree_prefix(view, i)
+                glyph = _glyph(node, view.is_expanded(node))
+                caret = ("▾ " if view.is_expanded(node) else "▸ ") if node.is_dir and node.children else "  "
+                name = node.name + ("/" if node.is_dir else "")
 
-            if is_sel:
-                # full-width selection highlight
-                _put(stdscr, y, 0, " " * (w - 1), C(C_SEL))
-            # size
-            _put(stdscr, y, 1, size_str, (C(C_SEL) | curses.A_BOLD) if is_sel else _size_attr(frac))
-            # pct
-            _put(stdscr, y, 13, pct, (C(C_SEL)) if is_sel else C(C_DIM))
-            # bar
-            _gradient_bar(stdscr, y, 20, bw, frac, dim=is_sel)
-            # name section
-            nx = 20 + bw + 2
-            name_attr = (C(C_SEL) | curses.A_BOLD) if is_sel else (
-                (C(C_FOLDER) | curses.A_BOLD) if node.is_dir else C(C_FG))
-            guide_attr = (C(C_SEL)) if is_sel else C(C_GUIDE)
-            _put(stdscr, y, nx, prefix, guide_attr)
-            nx2 = nx + _wlen(prefix)
-            _put(stdscr, y, nx2, caret, (C(C_SEL)) if is_sel else C(C_ACCENT))
-            nx3 = nx2 + 2
-            _put(stdscr, y, nx3, f"{glyph} ", name_attr)
-            _put(stdscr, y, nx3 + 2, name, name_attr)
+                if is_sel:
+                    _put(stdscr, y, 0, " " * (w - 1), C(C_SEL))
+                _put(stdscr, y, 1, size_str, (C(C_SEL) | curses.A_BOLD) if is_sel else _size_attr(frac))
+                _put(stdscr, y, 13, pct, (C(C_SEL)) if is_sel else C(C_DIM))
+                _gradient_bar(stdscr, y, 20, bw, frac, dim=is_sel)
+                nx = 20 + bw + 2
+                name_attr = (C(C_SEL) | curses.A_BOLD) if is_sel else (
+                    (C(C_FOLDER) | curses.A_BOLD) if node.is_dir else C(C_FG))
+                guide_attr = (C(C_SEL)) if is_sel else C(C_GUIDE)
+                _put(stdscr, y, nx, prefix, guide_attr)
+                nx2 = nx + _wlen(prefix)
+                _put(stdscr, y, nx2, caret, (C(C_SEL)) if is_sel else C(C_ACCENT))
+                nx3 = nx2 + 2
+                _put(stdscr, y, nx3, f"{glyph} ", name_attr)
+                _put(stdscr, y, nx3 + 2, name, name_attr)
+
+            sel = rows[selected].node if rows else None
+        else:
+            # ---- grid (treemap) ----
+            crumb = _ellip(grid_focus.path, w - 2)
+            _put(stdscr, 1, 1, f"▸ {crumb}", C(C_DIM) | curses.A_UNDERLINE)
+            kids = _render_grid(stdscr, view, grid_focus, grid_sel,
+                                w, h, body_top, body_h, exact)
+            grid_sel = max(0, min(grid_sel, max(0, len(kids) - 1)))
+            sel = kids[grid_sel] if kids else grid_focus
 
         # ---- detail panel (selected item) ----
-        sel = rows[selected].node if rows else None
         py = h - 4
         _put(stdscr, py, 0, "─" * (w - 1), C(C_GUIDE))
         if sel:
-            psize = _parent_size(view, selected)
+            psize = _parent_size(view, selected) if mode == "list" else (grid_focus.size or 1)
             frac = (sel.size / psize) if psize else 0.0
             kind = "folder" if sel.is_dir else "file"
             nkids = len(sel.children) if sel.is_dir else 0
@@ -531,10 +650,15 @@ def _browse(stdscr, view: TreeView, scan_path: str) -> str:
             _put(stdscr, py + 3, 0, "   " + _ellip(sel.path, w - 5), C(C_DIM))
 
         # ---- help bar ----
-        help_txt = ("  ↑↓/jk move   →/⏎ open   ← back   g/G top/btm   "
-                    "s units   r rescan   q quit  ")
-        pos = f" {selected+1}/{len(rows)} "
-        line = help_txt.ljust(w - len(pos)) + pos
+        if mode == "list":
+            help_txt = ("  ↑↓/jk move   →/⏎ open   ← back   g top  End btm   "
+                        "L list  G grid   s units   r rescan   q quit  ")
+            pos = f" {selected+1}/{len(rows)} "
+        else:
+            help_txt = ("  ↑↓←→/hjkl move   ⏎ open   Bksp up   "
+                        "L list  G grid   s units   r rescan   q quit  ")
+            pos = f" grid "
+        line = help_txt.ljust(max(0, w - len(pos))) + pos
         _put(stdscr, h - 1, 0, line[: w - 1], C(C_BAR) | curses.A_BOLD)
 
         stdscr.refresh()
@@ -545,39 +669,96 @@ def _browse(stdscr, view: TreeView, scan_path: str) -> str:
         except KeyboardInterrupt:
             return "quit"
 
+        # ---- global keys ----
         if ch in (ord("q"), 27):
             return "quit"
-        elif ch in (curses.KEY_DOWN, ord("j")):
-            selected += 1
-        elif ch in (curses.KEY_UP, ord("k")):
-            selected -= 1
-        elif ch == curses.KEY_NPAGE:
-            selected += body_h
-        elif ch == curses.KEY_PPAGE:
-            selected -= body_h
-        elif ch == ord("g"):
-            selected = 0
-        elif ch == ord("G"):
-            selected = len(rows) - 1
-        elif ch in (curses.KEY_RIGHT, ord("l"), ord("\n"), curses.KEY_ENTER, 10, 13):
-            node = rows[selected].node
-            if node.is_dir and node.children:
-                if not view.is_expanded(node):
-                    view.expand(node)
-                else:
-                    selected += 1
-        elif ch in (curses.KEY_LEFT, ord("h")):
-            node = rows[selected].node
-            if node.is_dir and view.is_expanded(node):
-                view.collapse(node)
-            else:
-                pidx = _parent_index(view, selected)
-                if pidx is not None:
-                    selected = pidx
         elif ch == ord("s"):
             exact = not exact
+            continue
         elif ch == ord("r"):
             return "rescan"
+        elif ch == ord("L"):
+            mode = "list"
+            continue
+        elif ch == ord("G") and mode == "list":
+            # switch to grid, focusing the selected folder (or its parent)
+            node = rows[selected].node
+            grid_focus = node if (node.is_dir and node.children) else _parent_node(view, selected) or view.root
+            grid_sel = 0
+            mode = "grid"
+            continue
+        elif ch == ord("G") and mode == "grid":
+            continue  # already grid
+
+        if mode == "list":
+            if ch in (curses.KEY_DOWN, ord("j")):
+                selected += 1
+            elif ch in (curses.KEY_UP, ord("k")):
+                selected -= 1
+            elif ch == curses.KEY_NPAGE:
+                selected += body_h
+            elif ch == curses.KEY_PPAGE:
+                selected -= body_h
+            elif ch in (ord("g"), curses.KEY_HOME):
+                selected = 0
+            elif ch == curses.KEY_END:
+                selected = len(rows) - 1
+            elif ch in (curses.KEY_RIGHT, ord("l"), ord("\n"), curses.KEY_ENTER, 10, 13):
+                node = rows[selected].node
+                if node.is_dir and node.children:
+                    if not view.is_expanded(node):
+                        view.expand(node)
+                    else:
+                        selected += 1
+            elif ch in (curses.KEY_LEFT, ord("h")):
+                node = rows[selected].node
+                if node.is_dir and view.is_expanded(node):
+                    view.collapse(node)
+                else:
+                    pidx = _parent_index(view, selected)
+                    if pidx is not None:
+                        selected = pidx
+        else:
+            # ---- grid navigation (spatial) ----
+            kids = view.children(grid_focus)
+            kids = [c for c in kids if c.size > 0]
+            if ch in (curses.KEY_RIGHT, ord("l"), ord("j"), curses.KEY_DOWN):
+                grid_sel = min(len(kids) - 1, grid_sel + 1) if kids else 0
+            elif ch in (curses.KEY_LEFT, ord("h"), ord("k"), curses.KEY_UP):
+                grid_sel = max(0, grid_sel - 1)
+            elif ch in (ord("\n"), curses.KEY_ENTER, 10, 13):
+                if kids and kids[grid_sel].is_dir and kids[grid_sel].children:
+                    grid_focus = kids[grid_sel]
+                    grid_sel = 0
+            elif ch in (curses.KEY_BACKSPACE, 127, 8):
+                parent = _node_by_path(view.root, _parent_path(grid_focus.path))
+                if parent is not None:
+                    grid_focus = parent
+                    grid_sel = 0
+
+
+def _parent_node(view, idx):
+    pj = _parent_index(view, idx)
+    return view.rows[pj].node if pj is not None else None
+
+
+def _parent_path(path: str) -> str:
+    p = path.rstrip("/")
+    cut = p.rfind("/")
+    return p[:cut] if cut > 0 else "/"
+
+
+def _node_by_path(root, target):
+    if root.path.rstrip("/") == target.rstrip("/"):
+        return root
+    stack = list(root.children)
+    while stack:
+        n = stack.pop()
+        if n.path.rstrip("/") == target.rstrip("/"):
+            return n
+        if n.is_dir:
+            stack.extend(n.children)
+    return None
 
 
 def _barw(w: int) -> int:
