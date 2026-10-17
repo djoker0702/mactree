@@ -5,6 +5,8 @@ Endpoints
 POST /api/scan        -> start a scan job for a path; returns a job id
 GET  /api/scan/{id}   -> progress snapshot (and result when done)
 GET  /api/tree/{id}   -> serialized (sub)tree, optionally rooted at ?path=
+GET  /api/artifacts/{id}         -> detected residual dev artifacts
+POST /api/artifacts/{id}/delete  -> delete selected artifact paths (guarded)
 GET  /api/home        -> the user's home directory (UI default)
 GET  /                -> the single-page frontend
 """
@@ -25,6 +27,7 @@ from pydantic import BaseModel
 
 from .scanner import Node, Scanner
 from .serialize import find_node, serialize
+from .artifacts import detect, delete_paths
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -44,6 +47,10 @@ class ScanRequest(BaseModel):
     path: str
     workers: Optional[int] = None
     use_allocated: bool = True
+
+
+class DeleteRequest(BaseModel):
+    paths: list[str]
 
 
 _jobs: Dict[str, Job] = {}
@@ -122,6 +129,57 @@ def create_app(default_workers: Optional[int] = None) -> FastAPI:
                 raise HTTPException(status_code=404, detail="Path not in tree")
             target = found
         return serialize(target)
+
+    @app.get("/api/artifacts/{job_id}")
+    def get_artifacts(job_id: str) -> dict:
+        """Detect residual dev artifacts in a finished scan."""
+        job = _jobs.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Unknown job id")
+        with job.lock:
+            root = job.root
+        if root is None:
+            raise HTTPException(status_code=409, detail="Scan not finished")
+        findings = detect(root)
+        return {
+            "root": job.path,
+            "total": sum(f.size for f in findings),
+            "items": [
+                {
+                    "name": f.name,
+                    "path": f.path,
+                    "size": f.size,
+                    "reason": f.reason,
+                    "ambiguous": f.ambiguous,
+                }
+                for f in findings
+            ],
+        }
+
+    @app.post("/api/artifacts/{job_id}/delete")
+    def delete_artifacts(job_id: str, req: DeleteRequest) -> dict:
+        """Delete the selected artifact paths (guarded to stay inside the scan)."""
+        job = _jobs.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Unknown job id")
+        with job.lock:
+            root = job.root
+        if root is None:
+            raise HTTPException(status_code=409, detail="Scan not finished")
+        if not req.paths:
+            raise HTTPException(status_code=400, detail="No paths provided")
+
+        report = delete_paths(req.paths, job.path)
+        # Invalidate the cached tree so the client knows to rescan for fresh sizes.
+        if report["deleted"]:
+            with job.lock:
+                job.root = None
+        return {
+            "deleted": report["deleted"],
+            "errors": [{"path": p, "message": m} for p, m in report["errors"]],
+            "freed": report["freed"],
+            "needsRescan": bool(report["deleted"]),
+        }
 
     @app.get("/api/home")
     def home_dir() -> dict:

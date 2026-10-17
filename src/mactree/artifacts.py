@@ -161,3 +161,52 @@ def delete_findings(findings: List[Finding], root_path: str) -> dict:
             report["errors"].append((p, str(exc)))
 
     return report
+
+
+def delete_paths(paths, root_path: str) -> dict:
+    """Delete the given artifact ``paths`` (web API helper).
+
+    Builds :class:`Finding` objects for the requested paths by re-detecting
+    sizes from disk is unnecessary — we trust the caller's path list but still
+    apply every guard in :func:`delete_findings`. Only paths whose basename is a
+    known artifact and that live inside ``root_path`` are removed.
+    """
+    import os
+
+    findings = []
+    wanted = set(paths)
+    for p in wanted:
+        base = os.path.basename(p.rstrip("/"))
+        size = 0
+        try:
+            # best-effort size for the freed report (allocated blocks)
+            size = _dir_size(p)
+        except OSError:
+            size = 0
+        findings.append(
+            Finding(
+                name=base,
+                path=p,
+                size=size,
+                reason=KNOWN_ARTIFACTS.get(base, ""),
+                ambiguous=base in AMBIGUOUS,
+                checked=True,
+            )
+        )
+    return delete_findings(findings, root_path)
+
+
+def _dir_size(path: str) -> int:
+    """Allocated size of a directory tree (used only for the freed report)."""
+    import os
+
+    total = 0
+    for dirpath, dirnames, filenames in os.walk(path):
+        for name in filenames:
+            try:
+                st = os.lstat(os.path.join(dirpath, name))
+                blocks = getattr(st, "st_blocks", None)
+                total += blocks * 512 if blocks is not None else st.st_size
+            except OSError:
+                continue
+    return total

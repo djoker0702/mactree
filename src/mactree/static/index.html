@@ -19,6 +19,7 @@
       <button data-view="treemap" class="active">Treemap</button>
       <button data-view="sunburst">Sunburst</button>
     </div>
+    <button id="clean-btn" class="clean-btn" disabled>🧹 Clean</button>
   </header>
 
   <div id="status" class="status"></div>
@@ -34,6 +35,25 @@
   </div>
 
   <div id="tooltip" class="tooltip" hidden></div>
+
+  <!-- Cleanup modal -->
+  <div id="clean-overlay" class="overlay" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="clean-title">
+      <div class="modal-head">
+        <div id="clean-title">🧹 Residual dev artifacts</div>
+        <button id="clean-close" class="icon-btn" title="Close">✕</button>
+      </div>
+      <div id="clean-summary" class="modal-summary"></div>
+      <div id="clean-list" class="clean-list"></div>
+      <div class="modal-foot">
+        <label class="select-all"><input type="checkbox" id="clean-all" /> select all</label>
+        <div class="foot-right">
+          <span id="clean-selected" class="clean-selected"></span>
+          <button id="clean-delete" class="danger-btn" disabled>Delete selected</button>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <script src="/static/app.js"></script>
 </body>

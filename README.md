@@ -18,7 +18,8 @@ python -m mactree --web        # browser UI
   - **TUI** (default): an `ncdu`-style terminal browser — expand/collapse folders,
     per-entry size bars, color-coded by how big each item is, keyboard-driven.
   - **Web**: a nested, animated **treemap** and **sunburst** drawn with D3.js,
-    with a live metadata inspector, hover highlighting, zoom, and breadcrumbs.
+    with a live metadata inspector, hover highlighting, zoom, breadcrumbs, and
+    one-click residual-artifact cleanup.
 - **Fast multi-threaded scanning** — a work-queue thread pool walks the tree with
   `os.scandir`. The `scandir`/`stat` syscalls release the GIL while blocked on
   I/O, so threads give real speedups on disk-bound workloads. Each directory is a
@@ -116,6 +117,11 @@ directory), and click **Scan**. Then:
   inspector (size, share of parent, type, child count, full path).
 - **Click** a folder to zoom in; use the **breadcrumbs** (or the sunburst center)
   to go back.
+- **🧹 Clean**: after a scan, click **Clean** to find residual dev artifacts
+  (`node_modules`, `.terraform`, caches, build dirs …). Tick the ones to remove
+  with checkboxes (ambiguous names like `build`/`dist` get a *verify* badge),
+  then **Delete selected** — guarded by a confirmation and restricted to the
+  scanned directory. The view rescans afterward to show the reclaimed space.
 
 ---
 

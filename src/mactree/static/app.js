@@ -21,6 +21,17 @@ const crumbsEl = $("#breadcrumbs");
 const chartEl = $("#chart");
 const tooltip = $("#tooltip");
 const inspectorEl = $("#inspector");
+const cleanBtn = $("#clean-btn");
+const cleanOverlay = $("#clean-overlay");
+const cleanClose = $("#clean-close");
+const cleanSummary = $("#clean-summary");
+const cleanListEl = $("#clean-list");
+const cleanAll = $("#clean-all");
+const cleanSelected = $("#clean-selected");
+const cleanDelete = $("#clean-delete");
+
+// cleanup state
+let cleanItems = []; // {name,path,size,reason,ambiguous,checked}
 
 // ---- helpers -------------------------------------------------------------
 function fmtBytes(n) {
@@ -103,6 +114,7 @@ function pollProgress() {
           `Done · ${fmtNum(p.dirs)} folders · ${fmtNum(p.files)} files · ` +
           `${fmtBytes(p.bytes)} · ${p.elapsed}s`);
         scanBtn.disabled = false;
+        cleanBtn.disabled = false;
         await loadTree(state.rootPath);
         return;
       }
@@ -439,6 +451,7 @@ form.addEventListener("submit", (e) => {
   setStatus("Starting scan…", { busy: true });
   chartEl.querySelectorAll("svg").forEach((s) => s.remove());
   crumbsEl.innerHTML = "";
+  cleanBtn.disabled = true;
   startScan(path).catch((err) => {
     setStatus(`Error: ${err.message}`, { error: true });
     scanBtn.disabled = false;
@@ -461,6 +474,128 @@ addEventListener("resize", () => {
 });
 
 tooltip.addEventListener("mousemove", (e) => moveTooltip(e));
+
+// ---- cleanup (residual dev artifacts) ------------------------------------
+function escapeHtmlC(s) {
+  return String(s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+async function openClean() {
+  if (!state.jobId) return;
+  cleanOverlay.hidden = false;
+  cleanListEl.innerHTML = `<div class="clean-empty">Scanning for artifacts…</div>`;
+  cleanSummary.textContent = "";
+  cleanAll.checked = false;
+  cleanDelete.disabled = true;
+  cleanSelected.textContent = "";
+  try {
+    const res = await api(`/api/artifacts/${state.jobId}`);
+    cleanItems = res.items.map((it) => ({ ...it, checked: false }));
+    renderCleanList(res);
+  } catch (e) {
+    cleanListEl.innerHTML =
+      `<div class="clean-empty">Error: ${escapeHtmlC(e.message)}</div>`;
+  }
+}
+
+function renderCleanList(res) {
+  if (!cleanItems.length) {
+    cleanSummary.innerHTML = "";
+    cleanListEl.innerHTML =
+      `<div class="clean-empty">✓ No known residual artifacts found.<br>` +
+      `<span style="color:var(--muted);font-size:13px">` +
+      `(looked for node_modules, .terraform, .npm, .yarn, __pycache__, target, caches, build dirs…)` +
+      `</span></div>`;
+    return;
+  }
+  cleanSummary.innerHTML =
+    `Found <b>${cleanItems.length}</b> item(s) totalling <b>${fmtBytes(res.total)}</b>. ` +
+    `Tick items to delete. These are regenerable, but deletion is permanent.`;
+
+  cleanListEl.innerHTML = cleanItems.map((it, i) => `
+    <label class="clean-row" data-i="${i}">
+      <input type="checkbox" ${it.checked ? "checked" : ""} />
+      <span class="cr-size">${fmtBytes(it.size)}</span>
+      <span class="cr-meta">
+        <span class="cr-name ${it.ambiguous ? "amb" : ""}">${escapeHtmlC(it.name)}${
+          it.ambiguous ? `<span class="clean-badge">verify</span>` : ""}</span>
+        <div class="cr-path">${escapeHtmlC(it.path)}</div>
+        <div class="cr-why">${escapeHtmlC(it.reason || "")}</div>
+      </span>
+    </label>`).join("");
+
+  cleanListEl.querySelectorAll(".clean-row input").forEach((cb, i) => {
+    cb.addEventListener("change", () => {
+      cleanItems[i].checked = cb.checked;
+      updateCleanFooter();
+    });
+  });
+  updateCleanFooter();
+}
+
+function updateCleanFooter() {
+  const sel = cleanItems.filter((it) => it.checked);
+  const freed = sel.reduce((a, it) => a + it.size, 0);
+  cleanSelected.textContent = sel.length
+    ? `${sel.length} selected · ${fmtBytes(freed)}` : "";
+  cleanDelete.disabled = sel.length === 0;
+  cleanAll.checked = cleanItems.length > 0 && sel.length === cleanItems.length;
+}
+
+function closeClean() { cleanOverlay.hidden = true; }
+
+async function deleteSelected() {
+  const sel = cleanItems.filter((it) => it.checked);
+  if (!sel.length) return;
+  const freed = sel.reduce((a, it) => a + it.size, 0);
+  const amb = sel.filter((it) => it.ambiguous).length;
+  let msg = `Permanently delete ${sel.length} item(s), freeing about ${fmtBytes(freed)}?\n\n`;
+  msg += sel.slice(0, 10).map((it) => `• ${it.name}  (${fmtBytes(it.size)})`).join("\n");
+  if (sel.length > 10) msg += `\n… and ${sel.length - 10} more`;
+  if (amb) msg += `\n\n⚠ ${amb} ambiguous item(s) (build/dist/vendor/venv) selected.`;
+  if (!window.confirm(msg)) return;
+
+  cleanDelete.disabled = true;
+  cleanDelete.textContent = "Deleting…";
+  try {
+    const res = await api(`/api/artifacts/${state.jobId}/delete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ paths: sel.map((it) => it.path) }),
+    });
+    const errs = res.errors && res.errors.length
+      ? `\n${res.errors.length} error(s):\n` +
+        res.errors.map((e) => `• ${e.path}: ${e.message}`).join("\n")
+      : "";
+    window.alert(`Deleted ${res.deleted.length} item(s), freed ${fmtBytes(res.freed)}.${errs}`);
+    closeClean();
+    if (res.needsRescan) {
+      // tree sizes are stale — rescan the same root
+      setStatus("Rescanning after cleanup…", { busy: true });
+      cleanBtn.disabled = true;
+      await startScan(state.rootPath);
+    }
+  } catch (e) {
+    window.alert(`Error: ${e.message}`);
+  } finally {
+    cleanDelete.textContent = "Delete selected";
+    updateCleanFooter();
+  }
+}
+
+cleanBtn.addEventListener("click", openClean);
+cleanClose.addEventListener("click", closeClean);
+cleanOverlay.addEventListener("click", (e) => { if (e.target === cleanOverlay) closeClean(); });
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !cleanOverlay.hidden) closeClean();
+});
+cleanAll.addEventListener("change", () => {
+  cleanItems.forEach((it) => (it.checked = cleanAll.checked));
+  cleanListEl.querySelectorAll(".clean-row input").forEach((cb) => (cb.checked = cleanAll.checked));
+  updateCleanFooter();
+});
+cleanDelete.addEventListener("click", deleteSelected);
 
 // ---- init -----------------------------------------------------------------
 (async function init() {
