@@ -29,6 +29,7 @@ import time
 from typing import List, Optional
 
 from .scanner import Node, Scanner
+from .artifacts import Finding, detect, delete_findings, total_size
 
 
 # --------------------------------------------------------------------------
@@ -716,11 +717,11 @@ def _browse(stdscr, view: TreeView, scan_path: str) -> str:
         # ---- help bar ----
         if mode == "list":
             help_txt = ("  ↑↓/jk move   →/⏎ open   ← back   g top  End btm   "
-                        "L list  G grid   s units   r rescan   q quit  ")
+                        "L list  G grid   c clean   s units   r rescan   q quit  ")
             pos = f" {selected+1}/{len(rows)} "
         else:
             help_txt = ("  ↑↓←→/hjkl move   ⏎ open   Bksp up   "
-                        "L list  G grid   s units   r rescan   q quit  ")
+                        "L list  G grid   c clean   s units   r rescan   q quit  ")
             pos = f" grid "
         line = help_txt.ljust(max(0, w - len(pos))) + pos
         _put(stdscr, h - 1, 0, line[: w - 1], C(C_BAR) | curses.A_BOLD)
@@ -736,6 +737,8 @@ def _browse(stdscr, view: TreeView, scan_path: str) -> str:
         # ---- global keys ----
         if ch in (ord("q"), 27):
             return "quit"
+        elif ch == ord("c"):
+            return "clean"
         elif ch == ord("s"):
             exact = not exact
             continue
@@ -857,6 +860,195 @@ def _parent_size(view: TreeView, idx: int) -> int:
 
 
 # --------------------------------------------------------------------------
+# Residual dev-artifact findings view (with [ ]/[x] toggles + deletion)
+# --------------------------------------------------------------------------
+def _confirm(stdscr, lines, danger=True) -> bool:
+    """Modal yes/no. Returns True only if the user types 'y'."""
+    h, w = stdscr.getmaxyx()
+    bw = min(max(len(l) for l in lines) + 6, w - 4)
+    bh = len(lines) + 4
+    bx = (w - bw) // 2
+    by = max(1, (h - bh) // 2)
+    accent = C(C_RED) if danger else C(C_ACCENT)
+    _draw_box(stdscr, by, bx, bh, bw, title=" confirm ", title_attr=accent | curses.A_BOLD)
+    for i, ln in enumerate(lines):
+        _put(stdscr, by + 1 + i, bx + 3, ln[: bw - 6], C(C_FG) | (curses.A_BOLD if i == 0 else 0))
+    _put(stdscr, by + bh - 2, bx + 3,
+         "press  y  to confirm,  any other key to cancel",
+         accent | curses.A_BOLD)
+    stdscr.refresh()
+    ch = stdscr.getch()
+    return ch in (ord("y"), ord("Y"))
+
+
+def _report_screen(stdscr, report: dict) -> None:
+    stdscr.nodelay(False)
+    h, w = stdscr.getmaxyx()
+    stdscr.erase()
+    _put(stdscr, 1, 2, "🧹 Cleanup complete", C(C_GREEN) | curses.A_BOLD)
+    _put(stdscr, 3, 2, f"Deleted {len(report['deleted'])} item(s), "
+                       f"freed {human(report['freed'])}.", C(C_FG) | curses.A_BOLD)
+    y = 5
+    for p in report["deleted"][: h - 10]:
+        _put(stdscr, y, 4, "✓ " + _ellip(p, w - 8), C(C_DIM))
+        y += 1
+    if report["errors"]:
+        y += 1
+        _put(stdscr, y, 2, f"{len(report['errors'])} error(s):", C(C_RED) | curses.A_BOLD)
+        y += 1
+        for p, msg in report["errors"][: h - y - 3]:
+            _put(stdscr, y, 4, "✗ " + _ellip(f"{p}  —  {msg}", w - 8), C(C_RED))
+            y += 1
+    _put(stdscr, h - 1, 0, " press any key to return ".ljust(w)[: w - 1],
+         C(C_BAR) | curses.A_BOLD)
+    stdscr.refresh()
+    stdscr.getch()
+
+
+def _findings_screen(stdscr, root: Node, scan_path: str) -> str:
+    """Show detected residual artifacts with [ ]/[x] toggles.
+
+    Returns 'back' (return to browser) or 'rescan' (after a deletion).
+    """
+    curses.curs_set(0)
+    _init_colors()
+    stdscr.keypad(True)
+
+    findings: List[Finding] = detect(root)
+    selected = 0
+    top = 0
+
+    while True:
+        h, w = stdscr.getmaxyx()
+        body_top = 2
+        body_h = max(1, h - 5)
+
+        if not findings:
+            stdscr.erase()
+            _put(stdscr, 0, 0, "  🧹 Residual dev artifacts ".ljust(w)[: w - 1],
+                 C(C_BAR) | curses.A_BOLD)
+            _put(stdscr, 2, 2, "No known residual artifacts found 🎉", C(C_GREEN) | curses.A_BOLD)
+            _put(stdscr, 4, 2, "(looked for node_modules, .terraform, .npm, .yarn, "
+                               "__pycache__, target, caches, build dirs …)", C(C_DIM))
+            _put(stdscr, h - 1, 0, "  b/Esc back   r rescan ".ljust(w)[: w - 1],
+                 C(C_BAR) | curses.A_BOLD)
+            stdscr.refresh()
+            ch = stdscr.getch()
+            if ch in (ord("b"), 27, ord("q")):
+                return "back"
+            if ch == ord("r"):
+                return "rescan"
+            continue
+
+        selected = max(0, min(selected, len(findings) - 1))
+        if selected < top:
+            top = selected
+        elif selected >= top + body_h:
+            top = selected - body_h + 1
+
+        n_checked = sum(1 for f in findings if f.checked)
+        checked_sz = total_size(findings, checked_only=True)
+        all_sz = total_size(findings)
+
+        stdscr.erase()
+
+        # ---- title ----
+        title = (f"  🧹 Residual dev artifacts   "
+                 f"{len(findings)} found • {human(all_sz)} total")
+        meta = f" selected: {n_checked} • {human(checked_sz)} "
+        line = title.ljust(max(0, w - len(meta))) + meta
+        _put(stdscr, 0, 0, line[: w - 1], C(C_BAR) | curses.A_BOLD)
+        _put(stdscr, 1, 1,
+             f"{'':3}{'SIZE':>10}  {'ARTIFACT':<18}  PATH / why",
+             C(C_DIM) | curses.A_UNDERLINE)
+
+        # ---- rows ----
+        for i in range(top, min(len(findings), top + body_h)):
+            f = findings[i]
+            y = body_top + (i - top)
+            is_sel = i == selected
+            box = "[x]" if f.checked else "[ ]"
+            size_str = human(f.size).rjust(10)
+            tag = f.name + (" ⚠" if f.ambiguous else "")
+            detail = _ellip(f.path, max(10, w - 40))
+
+            if is_sel:
+                _put(stdscr, y, 0, " " * (w - 1), C(C_SEL))
+            box_attr = (C(C_SEL) | curses.A_BOLD) if is_sel else (
+                C(C_GREEN) | curses.A_BOLD if f.checked else C(C_DIM))
+            _put(stdscr, y, 1, box, box_attr)
+            _put(stdscr, y, 5, size_str,
+                 (C(C_SEL) | curses.A_BOLD) if is_sel else _size_attr(1.0 if f.size else 0))
+            name_attr = (C(C_SEL) | curses.A_BOLD) if is_sel else (
+                (C(C_YELLOW) if f.ambiguous else C(C_FOLDER)) | curses.A_BOLD)
+            _put(stdscr, y, 17, tag[:18].ljust(18), name_attr)
+            _put(stdscr, y, 37, detail, (C(C_SEL)) if is_sel else C(C_FG))
+
+        # ---- footer ----
+        help_txt = ("  ↑↓ move   Space toggle   a all   n none   "
+                    "d delete selected   r rescan   b back  ")
+        pos = f" {selected+1}/{len(findings)} "
+        line = help_txt.ljust(max(0, w - len(pos))) + pos
+        _put(stdscr, h - 1, 0, line[: w - 1], C(C_BAR) | curses.A_BOLD)
+
+        stdscr.refresh()
+
+        # ---- input ----
+        try:
+            ch = stdscr.getch()
+        except KeyboardInterrupt:
+            return "back"
+
+        if ch in (ord("b"), 27, ord("q")):
+            return "back"
+        elif ch in (curses.KEY_DOWN, ord("j")):
+            selected += 1
+        elif ch in (curses.KEY_UP, ord("k")):
+            selected -= 1
+        elif ch == curses.KEY_NPAGE:
+            selected += body_h
+        elif ch == curses.KEY_PPAGE:
+            selected -= body_h
+        elif ch == ord("g"):
+            selected = 0
+        elif ch == ord("G"):
+            selected = len(findings) - 1
+        elif ch == ord(" "):
+            findings[selected].checked = not findings[selected].checked
+        elif ch == ord("a"):
+            for f in findings:
+                f.checked = True
+        elif ch == ord("n"):
+            for f in findings:
+                f.checked = False
+        elif ch == ord("r"):
+            return "rescan"
+        elif ch == ord("d"):
+            chosen = [f for f in findings if f.checked]
+            if not chosen:
+                continue
+            amb = sum(1 for f in chosen if f.ambiguous)
+            lines = [
+                f"Delete {len(chosen)} item(s), freeing {human(checked_sz)}?",
+                "",
+                "This permanently removes the directories below.",
+            ]
+            if amb:
+                lines.append(f"⚠ {amb} of them are ambiguous (build/dist/vendor/venv).")
+            # list a few
+            for f in chosen[:6]:
+                lines.append(f"  • {f.name}  {human(f.size)}  {_ellip(f.path, 50)}")
+            if len(chosen) > 6:
+                lines.append(f"  … and {len(chosen) - 6} more")
+
+            if _confirm(stdscr, lines, danger=True):
+                report = delete_findings(findings, scan_path)
+                _report_screen(stdscr, report)
+                return "rescan"
+            # cancelled -> redraw
+
+
+# --------------------------------------------------------------------------
 # Public entry point
 # --------------------------------------------------------------------------
 def run_tui(path: str, workers: Optional[int] = None) -> None:
@@ -868,9 +1060,17 @@ def run_tui(path: str, workers: Optional[int] = None) -> None:
             if root is None:
                 return
             view = TreeView(root)
-            action = _browse(stdscr, view, path)
-            if action == "quit":
-                return
-            # action == "rescan" -> loop and scan again
+            while True:
+                action = _browse(stdscr, view, path)
+                if action == "quit":
+                    return
+                if action == "rescan":
+                    break  # re-scan from scratch
+                if action == "clean":
+                    fa = _findings_screen(stdscr, root, path)
+                    if fa == "rescan":
+                        break  # deletion happened -> rescan to refresh sizes
+                    # fa == "back" -> loop back into the browser
+            # loop -> scan again
 
     curses.wrapper(_main)

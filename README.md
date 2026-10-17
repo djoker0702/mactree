@@ -25,6 +25,12 @@ python -m mactree --web        # browser UI
   unit of work; subdirectories are pushed back onto the queue so every worker
   stays busy even on lopsided trees.
 - **Live progress** while scanning (folders / files / bytes / elapsed).
+- **Residual dev-artifact cleanup** (TUI) — press `c` to scan the results for
+  known regenerable junk (`node_modules`, `.terraform`, `.npm`, `.yarn`,
+  `__pycache__`, `target`, `.venv`, caches, build dirs …), tick items with
+  `[ ]`/`[x]`, and delete the selected ones (with a confirmation prompt) to
+  reclaim space. Ambiguous names (`build`/`dist`/`vendor`/`venv`) are flagged ⚠,
+  and deletions are guarded to stay inside the scanned directory.
 - **Accurate sizes** — uses allocated blocks (`st_blocks * 512`), i.e. "size on
   disk", like WinDirStat. Symlinks are not followed, to avoid cycles.
 - **Zero heavy deps for the terminal UI** — the TUI uses only the standard
@@ -80,6 +86,7 @@ switchable at any time.
 | `End` | jump to bottom (list) |
 | `PgUp` / `PgDn` | page up / down (list) |
 | `s` | toggle size units (human-readable ↔ exact bytes) |
+| `c` | **clean**: find residual dev artifacts, tick `[ ]`/`[x]`, delete selected |
 | `r` | rescan |
 | `q` | quit |
 
@@ -153,7 +160,8 @@ inter-process overhead. The pool is intentionally oversubscribed
 src/mactree/
 ├── scanner.py      # multi-threaded disk scanner (Node tree + progress)
 ├── serialize.py    # tree pruning → compact JSON for the web UI
-├── tui.py          # curses terminal UI
+├── tui.py          # curses terminal UI (list + grid + artifact cleanup)
+├── artifacts.py    # residual dev-artifact detection + guarded deletion
 ├── app.py          # FastAPI backend (scan jobs + API)
 ├── __main__.py     # CLI: python -m mactree
 └── static/         # web frontend (index.html, style.css, app.js)
