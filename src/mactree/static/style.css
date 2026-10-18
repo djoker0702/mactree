@@ -233,6 +233,8 @@ path.arc { cursor: pointer; stroke: var(--bg); stroke-width: 1px; transition: op
   background: rgba(4,6,10,0.6); backdrop-filter: blur(3px);
   display: flex; align-items: center; justify-content: center;
 }
+/* The [hidden] attribute must win over display:flex above. */
+.overlay[hidden] { display: none !important; }
 .modal {
   width: min(760px, 92vw); max-height: 82vh; display: flex; flex-direction: column;
   background: var(--panel); border: 1px solid var(--border); border-radius: 16px;
