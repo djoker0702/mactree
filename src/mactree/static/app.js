@@ -250,22 +250,46 @@ function makeHierarchy() {
     .sort((a, b) => b.value - a.value);
 }
 
-// -- tooltip --
+// -- tooltip (optimized: rAF-throttled, transform-based, no per-move layout) --
+let _ttData = null;      // last data shown (skip innerHTML churn)
+let _ttX = 0, _ttY = 0;  // last pointer position
+let _ttRaf = 0;          // pending animation frame
+let _ttW = 0, _ttH = 0;  // cached tooltip size
+
 function showTooltip(evt, data) {
-  tooltip.hidden = false;
-  tooltip.innerHTML =
-    `<div class="t-name">${escapeHtml(data.name)}</div>` +
-    `<div class="t-size">${fmtBytes(data.size)}</div>`;
+  if (tooltip.hidden) tooltip.hidden = false;
+  if (data !== _ttData) {
+    _ttData = data;
+    tooltip.innerHTML =
+      `<div class="t-name">${escapeHtml(data.name)}</div>` +
+      `<div class="t-size">${fmtBytes(data.size)}</div>`;
+    // size changes only when content changes — measure once here
+    _ttW = tooltip.offsetWidth;
+    _ttH = tooltip.offsetHeight;
+  }
   moveTooltip(evt);
 }
+
 function moveTooltip(evt) {
-  const pad = 14, r = tooltip.getBoundingClientRect();
-  let x = evt.clientX + pad, y = evt.clientY + pad;
-  if (x + r.width > innerWidth) x = evt.clientX - r.width - pad;
-  if (y + r.height > innerHeight) y = evt.clientY - r.height - pad;
-  tooltip.style.left = x + "px"; tooltip.style.top = y + "px";
+  _ttX = evt.clientX;
+  _ttY = evt.clientY;
+  if (_ttRaf) return;              // coalesce bursts of mousemove into one frame
+  _ttRaf = requestAnimationFrame(() => {
+    _ttRaf = 0;
+    const pad = 14;
+    let x = _ttX + pad, y = _ttY + pad;
+    if (x + _ttW > innerWidth) x = _ttX - _ttW - pad;
+    if (y + _ttH > innerHeight) y = _ttY - _ttH - pad;
+    // translate3d keeps this on the compositor (no reflow)
+    tooltip.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+  });
 }
-const hideTooltip = () => (tooltip.hidden = true);
+
+function hideTooltip() {
+  if (_ttRaf) { cancelAnimationFrame(_ttRaf); _ttRaf = 0; }
+  _ttData = null;
+  tooltip.hidden = true;
+}
 
 // -- shared defs: soft shadow + gradients --
 function addDefs(svg) {
@@ -376,7 +400,7 @@ function clip(label, px) {
   return label.length > max ? label.slice(0, max - 1) + "…" : label;
 }
 
-/* -------------------- ANIMATED SUNBURST -------------------- */
+/* -------------------- ANIMATED SUNBURST (optimized) -------------------- */
 function renderSunburst() {
   const { w, h } = dims();
   const radius = Math.min(w, h) / 2 - 6;
@@ -391,31 +415,77 @@ function renderSunburst() {
 
   const svg = d3.select(chartEl).append("svg")
     .attr("viewBox", `${-w / 2} ${-h / 2} ${w} ${h}`);
-  addDefs(svg);
   const g = svg.append("g");
 
   const topNameOf = (d) => { let a = d; while (a.depth > 1) a = a.parent; return a.data.name; };
 
+  const nodes = root.descendants().filter((d) => d.depth > 0 && d.y0 < radius);
+
+  // --- precompute once: a stable id, fill color, and the set of ancestor ids.
+  // This turns hover dimming from O(nodes × depth) tree-walks into O(1) lookups.
+  nodes.forEach((d, i) => { d._id = i; });
+  root._id = -1;
+  nodes.forEach((d) => {
+    d._fill = colorForNode(topNameOf(d), d.depth, maxDepth);
+    const anc = new Set();
+    for (let a = d; a; a = a.parent) anc.add(a._id);
+    d._anc = anc;              // ids of self + all ancestors
+  });
+
   const arcs = g.selectAll("path.arc")
-    .data(root.descendants().filter((d) => d.depth > 0 && d.y0 < radius))
+    .data(nodes)
     .join("path")
     .attr("class", "arc")
-    .attr("fill", (d) => colorForNode(topNameOf(d), d.depth, maxDepth))
-    .attr("d", arc)
-    .style("opacity", 0);
+    .attr("fill", (d) => d._fill)
+    .attr("d", arc);
 
-  // grow-in animation
-  arcs.transition().duration(500).delay((d) => d.depth * 60).style("opacity", 1);
+  // Lightweight grow-in: a single short fade on the whole group (no per-node
+  // staggered transitions, which were forcing many repaints).
+  g.style("opacity", 0)
+    .transition().duration(260).ease(d3.easeCubicOut)
+    .style("opacity", 1);
+
+  // --- fast hover: coalesce to one rAF, flip 'sun-dim' via a cheap set test.
+  let hoverRaf = 0;
+  let hoverTarget = null;
+  const domArcs = arcs.nodes();   // raw DOM list for direct className writes
+
+  function applyHover() {
+    hoverRaf = 0;
+    const t = hoverTarget;
+    if (t == null) {
+      // clear all dim
+      for (const el of domArcs) el.classList.remove("sun-dim");
+      return;
+    }
+    const anc = t._anc;
+    for (let i = 0; i < domArcs.length; i++) {
+      const el = domArcs[i];
+      // dim everything that is NOT an ancestor-or-self of the hovered node
+      const keep = anc.has(el.__data__._id);
+      // toggle only when needed (classList.toggle with force is cheap but we
+      // still avoid layout; className writes don't reflow on their own)
+      if (keep) el.classList.remove("sun-dim");
+      else el.classList.add("sun-dim");
+    }
+  }
+  function scheduleHover(target) {
+    hoverTarget = target;
+    if (!hoverRaf) hoverRaf = requestAnimationFrame(applyHover);
+  }
 
   arcs
     .on("mousemove", (e, d) => showTooltip(e, d.data))
-    .on("mouseleave", () => { hideTooltip(); if (!state.pinned) arcs.classed("sun-dim", false); })
-    .on("mouseover", function (e, d) {
-      arcs.classed("sun-dim", (n) => !isAncestorOrSelf(d, n));
+    .on("mouseenter", function (e, d) {
+      scheduleHover(d);
       showInspector(d.data, {
         parentSize: d.parent ? d.parent.data.size : d.data.size,
-        color: colorForNode(topNameOf(d), d.depth, maxDepth),
+        color: d._fill,
       });
+    })
+    .on("mouseleave", () => {
+      hideTooltip();
+      if (!state.pinned) scheduleHover(null);
     })
     .on("click", (e, d) => {
       hideTooltip();
