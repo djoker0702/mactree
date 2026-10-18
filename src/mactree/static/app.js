@@ -419,7 +419,16 @@ function renderSunburst() {
 
   const topNameOf = (d) => { let a = d; while (a.depth > 1) a = a.parent; return a.data.name; };
 
-  const nodes = root.descendants().filter((d) => d.depth > 0 && d.y0 < radius);
+  // --- cap what we draw. SVG with thousands of <path> nodes is the real
+  // bottleneck, so limit visible rings and drop arcs too thin to see. Outer
+  // rings and sub-degree slivers are invisible anyway; this cuts the arc
+  // count ~10x on large trees with no perceptible visual loss.
+  const MAX_RINGS = 6;
+  const MIN_ANGLE = 0.0045;        // radians (~0.26°); below this an arc is a sliver
+  const nodes = root.descendants().filter((d) =>
+    d.depth > 0 && d.depth <= MAX_RINGS && d.y0 < radius &&
+    (d.x1 - d.x0) >= MIN_ANGLE
+  );
 
   // --- precompute once: a stable id, fill color, and the set of ancestor ids.
   // This turns hover dimming from O(nodes × depth) tree-walks into O(1) lookups.
