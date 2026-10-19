@@ -455,6 +455,33 @@ function renderTreemap() {
       if (target && target.isDir) navigateTo(target);
     });
 
+  // Replayable "unpack" animation: tiles pop in from their own center, with a
+  // stagger so shallow containers appear first and children cascade in after.
+  // We tween the SVG transform *attribute* (translate + scale about each tile's
+  // centre) so the existing translate positioning isn't clobbered by CSS.
+  const playUnpack = () => {
+    g.interrupt().style("opacity", 0);
+    g.transition()
+      .duration(430)
+      .delay((d) => (d.depth - 1) * 65 + Math.random() * 40)
+      .ease(d3.easeBackOut.overshoot(1.1))
+      .style("opacity", 1)
+      .attrTween("transform", function (d) {
+        const cx = (d.x1 - d.x0) / 2, cy = (d.y1 - d.y0) / 2;
+        const i = d3.interpolate(0.6, 1);           // scale 0.6 -> 1
+        return (t) => {
+          const s = i(t);
+          // translate to position, then scale about the tile's own centre
+          return `translate(${d.x0},${d.y0}) translate(${cx},${cy}) scale(${s}) translate(${-cx},${-cy})`;
+        };
+      })
+      // settle to the clean static transform (no residual scale/precision drift)
+      .on("end", function (d) {
+        d3.select(this).attr("transform", `translate(${d.x0},${d.y0})`);
+      });
+  };
+  renderTarget._playAnim = playUnpack;
+
   function highlightTreemap(d) {
     g.classed("dim", (n) => !isAncestorOrSelf(d, n))
       .classed("highlight", (n) => n === d);
