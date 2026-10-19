@@ -258,8 +258,16 @@ function _buildView(view) {
 }
 
 function _showView(view) {
+  const activeBox = _box(view);
+  const wasActive = activeBox.classList.contains("active");
   _treemapBox.classList.toggle("active", view === "treemap");
   _sunboxBox.classList.toggle("active", view === "sunburst");
+  // Replay the view's intro animation when it (re)appears, so the preloaded
+  // sunburst still does its satisfying grow-in on click rather than snapping in.
+  if (!wasActive && typeof activeBox._playAnim === "function") {
+    // next frame, after it's displayed, so the transition is visible
+    requestAnimationFrame(() => activeBox._playAnim());
+  }
 }
 
 // Called when the underlying data/size changes (scan, zoom, resize).
@@ -295,11 +303,7 @@ function render() {
 // Instant view switch: show cached if ready, else build synchronously.
 function switchView(view) {
   state.view = view;
-  _ensureBoxes();
-  if (_builtVersion[view] !== _dataVersion) _buildView(view);
-  _showView(view);
-  // make sure the (now previous) view is also preloaded/fresh
-  render();
+  render();   // builds if stale, shows (plays intro anim), preloads the other
 }
 
 // idle-callback shims (Safari lacks requestIdleCallback)
@@ -518,11 +522,33 @@ function renderSunburst() {
     .attr("fill", (d) => d._fill)
     .attr("d", arc);
 
-  // Lightweight grow-in: a single short fade on the whole group (no per-node
-  // staggered transitions, which were forcing many repaints).
-  g.style("opacity", 0)
-    .transition().duration(260).ease(d3.easeCubicOut)
-    .style("opacity", 1);
+  // A replayable "grow-in": rings sweep outward from the center, staggered by
+  // depth. We DON'T auto-play it here (the chart may be built off-screen during
+  // preload). Instead we stash the animation on the box so it plays the moment
+  // the view actually becomes visible — preloaded for speed, animated on click.
+  const playGrowIn = () => {
+    // collapse: every arc starts as a thin wedge at its start angle, inner radius
+    arcs.interrupt()
+      .attr("d", (d) => {
+        const d0 = { x0: d.x0, x1: d.x0, y0: d.y0, y1: d.y0 };
+        return arc(d0);
+      })
+      .style("opacity", 0);
+    // expand to full shape, staggered by ring
+    arcs.transition()
+      .duration(650)
+      .delay((d) => d.depth * 90)
+      .ease(d3.easeCubicOut)
+      .style("opacity", 1)
+      .attrTween("d", function (d) {
+        const i = d3.interpolate(
+          { x0: d.x0, x1: d.x0, y0: d.y0, y1: d.y0 },
+          { x0: d.x0, x1: d.x1, y0: d.y0, y1: d.y1 }
+        );
+        return (t) => arc(i(t));
+      });
+  };
+  renderTarget._playAnim = playGrowIn;   // called by _showView when revealed
 
   // --- fast hover: coalesce to one rAF, flip 'sun-dim' via a cheap set test.
   let hoverRaf = 0;
