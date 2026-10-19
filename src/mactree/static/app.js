@@ -133,6 +133,7 @@ async function loadTree(path) {
   state.data = data;
   state.currentPath = data.path;
   state.pinned = null;
+  invalidateViews();   // data changed -> both cached views are now stale
   render();
   showInspector(data, { parentSize: data.size, isRoot: true });
 }
@@ -227,22 +228,90 @@ function escapeHtml(s) {
 }
 
 // ---- rendering ------------------------------------------------------------
+// Two persistent containers so switching views is instant: we render each view
+// once per data version, keep both in the DOM, and just toggle visibility.
+let renderTarget = chartEl;            // where the active render fn draws
+let _treemapBox = null, _sunboxBox = null;
+let _dataVersion = 0;                  // bumped whenever the drawn data changes
+const _builtVersion = { treemap: -1, sunburst: -1 };
+let _preloadIdle = 0;
+
+function _ensureBoxes() {
+  if (_treemapBox && _sunboxBox) return;
+  _treemapBox = document.createElement("div");
+  _sunboxBox = document.createElement("div");
+  _treemapBox.className = _sunboxBox.className = "view-box";
+  chartEl.appendChild(_treemapBox);
+  chartEl.appendChild(_sunboxBox);
+}
+
+function _box(view) { return view === "treemap" ? _treemapBox : _sunboxBox; }
+
+function _buildView(view) {
+  const box = _box(view);
+  box.innerHTML = "";                  // clear stale svg
+  renderTarget = box;
+  if (view === "treemap") renderTreemap();
+  else renderSunburst();
+  renderTarget = chartEl;
+  _builtVersion[view] = _dataVersion;
+}
+
+function _showView(view) {
+  _treemapBox.classList.toggle("active", view === "treemap");
+  _sunboxBox.classList.toggle("active", view === "sunburst");
+}
+
+// Called when the underlying data/size changes (scan, zoom, resize).
+function invalidateViews() {
+  _dataVersion++;
+}
+
 function render() {
   renderBreadcrumbs();
-  chartEl.querySelectorAll("svg").forEach((s) => s.remove());
-  if (!state.data) return;
-  ensureDefs();
-  if (state.view === "treemap") renderTreemap();
-  else renderSunburst();
+  if (!state.data) {
+    if (_treemapBox) _treemapBox.innerHTML = "";
+    if (_sunboxBox) _sunboxBox.innerHTML = "";
+    return;
+  }
+  _ensureBoxes();
+
+  const view = state.view;
+  // (re)build the active view only if it's stale for the current data
+  if (_builtVersion[view] !== _dataVersion) _buildView(view);
+  _showView(view);
+
+  // Preload the *other* view during idle time so the next toggle is instant.
+  const other = view === "treemap" ? "sunburst" : "treemap";
+  if (_builtVersion[other] !== _dataVersion) {
+    if (_preloadIdle) cancelIdle(_preloadIdle);
+    _preloadIdle = scheduleIdle(() => {
+      _preloadIdle = 0;
+      if (state.data && _builtVersion[other] !== _dataVersion) _buildView(other);
+    });
+  }
 }
+
+// Instant view switch: show cached if ready, else build synchronously.
+function switchView(view) {
+  state.view = view;
+  _ensureBoxes();
+  if (_builtVersion[view] !== _dataVersion) _buildView(view);
+  _showView(view);
+  // make sure the (now previous) view is also preloaded/fresh
+  render();
+}
+
+// idle-callback shims (Safari lacks requestIdleCallback)
+const scheduleIdle = (cb) =>
+  (window.requestIdleCallback || ((f) => setTimeout(() => f({}), 1)))(cb, { timeout: 400 });
+const cancelIdle = (id) =>
+  (window.cancelIdleCallback || clearTimeout)(id);
 
 function dims() {
   const r = chartEl.getBoundingClientRect();
   return { w: Math.max(120, r.width - 36), h: Math.max(120, r.height - 32) };
 }
-
-let svgDefsAdded = false;
-function ensureDefs() { svgDefsAdded = false; } // defs added per-svg below
 
 function makeHierarchy() {
   return d3.hierarchy(state.data)
@@ -314,7 +383,7 @@ function renderTreemap() {
     .round(true)
     .tile(d3.treemapSquarify.ratio(1))(root);
 
-  const svg = d3.select(chartEl).append("svg").attr("viewBox", `0 0 ${w} ${h}`);
+  const svg = d3.select(renderTarget).append("svg").attr("viewBox", `0 0 ${w} ${h}`);
   addDefs(svg);
 
   const topNameOf = (d) => {
@@ -393,7 +462,8 @@ function isAncestorOrSelf(target, n) {
   return false;
 }
 function clearHighlight() {
-  d3.select(chartEl).selectAll("g.cell").classed("dim", false).classed("highlight", false);
+  (_treemapBox ? d3.select(_treemapBox) : d3.select(chartEl))
+    .selectAll("g.cell").classed("dim", false).classed("highlight", false);
 }
 function clip(label, px) {
   const max = Math.max(1, Math.floor(px / 6.6));
@@ -413,7 +483,7 @@ function renderSunburst() {
     .padAngle(0.005).padRadius(radius / 3)
     .innerRadius((d) => d.y0).outerRadius((d) => Math.max(d.y0, d.y1 - 1.5));
 
-  const svg = d3.select(chartEl).append("svg")
+  const svg = d3.select(renderTarget).append("svg")
     .attr("viewBox", `${-w / 2} ${-h / 2} ${w} ${h}`);
   const g = svg.append("g");
 
@@ -541,15 +611,18 @@ document.querySelectorAll(".view-toggle button").forEach((btn) => {
   btn.addEventListener("click", () => {
     document.querySelectorAll(".view-toggle button").forEach((b) => b.classList.remove("active"));
     btn.classList.add("active");
-    state.view = btn.dataset.view;
-    render();
+    switchView(btn.dataset.view);   // instant: shows preloaded view if ready
   });
 });
 
 let resizeTimer;
 addEventListener("resize", () => {
   clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(() => { if (state.data) render(); }, 150);
+  resizeTimer = setTimeout(() => {
+    if (!state.data) return;
+    invalidateViews();   // dimensions changed -> rebuild both (active now, other on idle)
+    render();
+  }, 150);
 });
 
 tooltip.addEventListener("mousemove", (e) => moveTooltip(e));

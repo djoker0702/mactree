@@ -134,6 +134,8 @@ button:disabled { opacity: .5; cursor: default; transform: none; }
 main#chart {
   flex: 1; position: relative; overflow: hidden; padding: 16px 16px 16px 20px;
 }
+.view-box { position: absolute; inset: 16px 16px 16px 20px; display: none; }
+.view-box.active { display: block; }
 svg { width: 100%; height: 100%; display: block; }
 
 .inspector {
